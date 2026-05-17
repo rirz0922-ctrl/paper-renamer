@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 import zipfile
 import io
+from difflib import SequenceMatcher
 
 st.set_page_config(page_title="PaperRenamer", layout="wide")
 
@@ -93,6 +94,22 @@ def clean_filename(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def normalize_text(text):
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9가-힣]", "", text)
+    return text
+
+
+def similarity(a, b):
+    a = normalize_text(a)
+    b = normalize_text(b)
+
+    if not a or not b:
+        return 0
+
+    return SequenceMatcher(None, a, b).ratio()
+
+
 def expand_uploaded_files(uploaded_files):
     expanded_files = []
 
@@ -160,9 +177,14 @@ def find_doi(text):
     return None
 
 
-def extract_possible_titles(text, max_titles=5):
+def extract_possible_titles(text, max_titles=8):
     lines = text.split("\n")
     candidates = []
+
+    blocked_words = [
+        "abstract", "keywords", "introduction", "references",
+        "journal", "volume", "issue", "copyright"
+    ]
 
     for line in lines:
         line = line.strip()
@@ -175,9 +197,9 @@ def extract_possible_titles(text, max_titles=5):
             continue
         if re.search(r"10\.\d", line):
             continue
-        if re.search(r"^(abstract|keywords|introduction|references)$", line.lower()):
-            continue
         if re.search(r"^\d+$", line):
+            continue
+        if any(w in line.lower() for w in blocked_words):
             continue
 
         candidates.append(line)
@@ -187,7 +209,11 @@ def extract_possible_titles(text, max_titles=5):
 
 def get_crossref_info(doi):
     url = f"https://api.crossref.org/works/{doi}"
-    response = requests.get(url, timeout=10)
+
+    try:
+        response = requests.get(url, timeout=10)
+    except requests.RequestException:
+        return None
 
     if response.status_code != 200:
         return None
@@ -226,27 +252,40 @@ def get_crossref_info_by_title(title):
     url = "https://api.crossref.org/works"
     params = {
         "query.title": title,
-        "rows": 3
+        "rows": 5
     }
 
-    response = requests.get(url, params=params, timeout=10)
+    try:
+        response = requests.get(url, params=params, timeout=10)
+    except requests.RequestException:
+        return None, 0
 
     if response.status_code != 200:
-        return None
+        return None, 0
 
     items = response.json()["message"]["items"]
 
     if not items:
-        return None
+        return None, 0
+
+    best_info = None
+    best_score = 0
 
     for item in items:
+        crossref_title = item.get("title", [""])[0] if item.get("title") else ""
+        score = similarity(title, crossref_title)
+
         doi = item.get("DOI", "")
-        if doi:
+        if doi and score > best_score:
             info = get_crossref_info(doi)
             if info:
-                return info
+                best_info = info
+                best_score = score
 
-    return None
+    if best_score < 0.45:
+        return None, best_score
+
+    return best_info, best_score
 
 
 def read_pdf_text_from_bytes(pdf_bytes):
@@ -388,6 +427,16 @@ def make_search_links(info):
     return links
 
 
+def make_duplicate_key(info):
+    doi = info.get("doi", "")
+    title = info.get("title", "")
+
+    if doi:
+        return "doi:" + doi.lower().strip()
+
+    return "title:" + normalize_text(title)
+
+
 if uploaded_files and not start_button:
     st.warning("파일 업로드가 완료되었습니다. 정리를 시작하려면 [🚀 변경하기] 버튼을 눌러주세요.")
 
@@ -401,6 +450,7 @@ if uploaded_files and start_button:
 
     results = []
     pdf_files_for_zip = []
+    duplicate_tracker = {}
 
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -419,13 +469,16 @@ if uploaded_files and start_button:
 
             doi = find_doi(text)
             info = get_crossref_info(doi) if doi else None
+            match_score = 1.0 if info else 0
+            search_method = "DOI 검색" if info else ""
 
             if not info:
                 possible_titles = extract_possible_titles(text)
 
                 for possible_title in possible_titles:
-                    info = get_crossref_info_by_title(possible_title)
+                    info, match_score = get_crossref_info_by_title(possible_title)
                     if info:
+                        search_method = f"제목 검색 / 유사도 {match_score:.2f}"
                         break
 
             if not info:
@@ -433,20 +486,49 @@ if uploaded_files and start_button:
                     "원래 파일명": original_name,
                     "업로드 출처": source,
                     "논문 구분": "",
+                    "중복 여부": "",
+                    "메타데이터 경고": "Crossref 검색 실패",
                     "상태": "자동 정리 실패"
                 })
                 progress_bar.progress(idx / total_files)
                 continue
+
+            duplicate_key = make_duplicate_key(info)
+
+            if duplicate_key in duplicate_tracker:
+                duplicate_status = f"중복 가능: {duplicate_tracker[duplicate_key]}"
+            else:
+                duplicate_status = "중복 아님"
+                duplicate_tracker[duplicate_key] = original_name
 
             paper_type = "국문" if is_korean_paper(info) else "해외"
 
             default_filename = make_default_filename(info)
             professor_filename = make_professor_filename(info)
 
+            warnings = []
+
+            if make_author_filename_text(info["authors"]) == "Unknown":
+                warnings.append("저자 정보 없음")
+
+            if not info["year"]:
+                warnings.append("연도 정보 없음")
+
+            if not info["journal"]:
+                warnings.append("저널/학회지 정보 없음")
+
+            if match_score < 0.65:
+                warnings.append(f"제목 검색 정확도 낮음({match_score:.2f})")
+
+            metadata_warning = ", ".join(warnings) if warnings else "없음"
+
             results.append({
                 "원래 파일명": original_name,
                 "업로드 출처": source,
                 "논문 구분": paper_type,
+                "중복 여부": duplicate_status,
+                "검색 방식": search_method,
+                "메타데이터 경고": metadata_warning,
                 "저자": make_author_filename_text(info["authors"]),
                 "연도": info["year"],
                 "제목": info["title"],
@@ -473,6 +555,8 @@ if uploaded_files and start_button:
                 "원래 파일명": original_name,
                 "업로드 출처": source,
                 "논문 구분": "",
+                "중복 여부": "",
+                "메타데이터 경고": "",
                 "상태": f"오류: {e}"
             })
 
@@ -484,8 +568,12 @@ if uploaded_files and start_button:
 
     success_count = len(df[df["상태"] == "성공"])
     fail_count = total_files - success_count
+    duplicate_count = len(df[df.get("중복 여부", "") != "중복 아님"]) if "중복 여부" in df.columns else 0
 
-    st.success(f"전체 {total_files}개 중 성공 {success_count}개, 실패 {fail_count}개")
+    st.success(f"전체 {total_files}개 중 성공 {success_count}개, 실패 {fail_count}개, 중복 가능 {duplicate_count}개")
+
+    if duplicate_count > 0:
+        st.warning("중복 가능 논문이 감지되었습니다. DOI 또는 제목 기준으로 같은 논문일 가능성이 있습니다.")
 
     st.subheader("📋 정리 결과")
     st.dataframe(
@@ -544,6 +632,11 @@ if uploaded_files and start_button:
         if result["상태"] == "성공":
             st.write(f"업로드 출처: **{result['업로드 출처']}**")
             st.write(f"논문 구분: **{result['논문 구분']}**")
+            st.write(f"중복 여부: **{result['중복 여부']}**")
+            st.write(f"검색 방식: **{result['검색 방식']}**")
+
+            if result["메타데이터 경고"] != "없음":
+                st.warning(f"메타데이터 경고: {result['메타데이터 경고']}")
 
             st.markdown("#### 1. 기본 최종 파일명")
             st.code(result["기본 최종 파일명"])
