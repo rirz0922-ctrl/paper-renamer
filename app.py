@@ -10,6 +10,23 @@ st.set_page_config(page_title="PaperRenamer", layout="wide")
 
 st.title("📚 PaperRenamer")
 st.write("논문 PDF를 업로드한 뒤 [변경하기] 버튼을 누르면 자동 정리됩니다.")
+PASSWORD = "0210"
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title("🔒 PaperRenamer 로그인")
+    password = st.text_input("비밀번호를 입력하세요", type="password")
+
+    if st.button("입장하기"):
+        if password == PASSWORD:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("비밀번호가 틀렸습니다.")
+
+    st.stop()
 
 st.markdown("""
 <style>
