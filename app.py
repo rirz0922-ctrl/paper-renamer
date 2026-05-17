@@ -85,32 +85,48 @@ def is_korean_paper(info):
 
 
 def find_doi(text):
-    doi_pattern = r"10\.\d{4,9}/[-._;()/:A-Z0-9]+"
-    match = re.search(doi_pattern, text, re.I)
-    if match:
-        return match.group(0).rstrip(".,;)")
+    cleaned_text = text.replace("\n", " ").replace("\r", " ")
+    cleaned_text = re.sub(r"\s+", " ", cleaned_text)
+
+    doi_patterns = [
+        r"https?://doi\.org/(10\.\d{4,9}/[-._;()/:A-Z0-9]+)",
+        r"doi[:\s]*(10\.\d{4,9}/[-._;()/:A-Z0-9]+)",
+        r"(10\.\d{4,9}/[-._;()/:A-Z0-9]+)"
+    ]
+
+    for pattern in doi_patterns:
+        match = re.search(pattern, cleaned_text, re.I)
+        if match:
+            doi = match.group(1) if match.lastindex else match.group(0)
+            doi = doi.rstrip(".,;)")
+            return doi
+
     return None
 
 
-def extract_possible_title(text):
+def extract_possible_titles(text, max_titles=5):
     lines = text.split("\n")
     candidates = []
 
     for line in lines:
         line = line.strip()
 
-        if len(line) < 15:
+        if len(line) < 20:
+            continue
+        if len(line.split()) > 35:
             continue
         if "doi" in line.lower():
             continue
         if re.search(r"10\.\d", line):
             continue
-        if len(line.split()) > 30:
+        if re.search(r"^(abstract|keywords|introduction|references)$", line.lower()):
+            continue
+        if re.search(r"^\d+$", line):
             continue
 
         candidates.append(line)
 
-    return candidates[0] if candidates else None
+    return candidates[:max_titles]
 
 
 def get_crossref_info(doi):
@@ -153,7 +169,11 @@ def get_crossref_info(doi):
 
 def get_crossref_info_by_title(title):
     url = "https://api.crossref.org/works"
-    params = {"query.title": title, "rows": 1}
+
+    params = {
+        "query.title": title,
+        "rows": 3
+    }
 
     response = requests.get(url, params=params, timeout=10)
 
@@ -165,20 +185,27 @@ def get_crossref_info_by_title(title):
     if not items:
         return None
 
-    doi = items[0].get("DOI", "")
+    for item in items:
+        doi = item.get("DOI", "")
+        if doi:
+            info = get_crossref_info(doi)
+            if info:
+                return info
 
-    if not doi:
-        return None
-
-    return get_crossref_info(doi)
+    return None
 
 
 def read_pdf_text(uploaded_file):
     pdf_bytes = uploaded_file.read()
-    pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    pdf = fitz.open(
+        stream=pdf_bytes,
+        filetype="pdf"
+    )
 
     text = ""
-    for page_num in range(min(3, len(pdf))):
+
+    for page_num in range(min(8, len(pdf))):
         text += pdf[page_num].get_text()
 
     return text, pdf_bytes
@@ -288,6 +315,28 @@ def make_apa_format_note(info):
     else:
         return f"해외 논문으로 분류됨: 저널명 '{journal}'과 권(volume) '{volume}'은 이탤릭체로 처리하세요. 호(issue)는 이탤릭체로 처리하지 않습니다."
 
+def make_search_links(info):
+    title = info.get("title", "")
+    doi = info.get("doi", "")
+
+    scholar_url = f"https://scholar.google.com/scholar?q={requests.utils.quote(title)}"
+    crossref_url = f"https://search.crossref.org/?q={requests.utils.quote(title)}"
+    cnu_url = f"https://library.cnu.ac.kr/search/tot/result?st=KWRD&si=TOTAL&q={requests.utils.quote(title)}"
+    doi_url = f"https://doi.org/{doi}" if doi else ""
+
+    links = ""
+
+    if doi_url:
+        links += f'<a class="link-button" href="{doi_url}" target="_blank">🔗 DOI 바로가기</a>'
+
+    links += f"""
+    <a class="link-button" href="{scholar_url}" target="_blank">🔎 Google Scholar 검색</a>
+    <a class="link-button" href="{crossref_url}" target="_blank">🧷 Crossref 검색</a>
+    <a class="link-button" href="{cnu_url}" target="_blank">📚 충남대 도서관 검색</a>
+    """
+
+    return links
+
 
 if uploaded_files and not start_button:
     st.warning("PDF 업로드가 완료되었습니다. 정리를 시작하려면 [🚀 변경하기] 버튼을 눌러주세요.")
@@ -312,9 +361,12 @@ if uploaded_files and start_button:
             info = get_crossref_info(doi) if doi else None
 
             if not info:
-                possible_title = extract_possible_title(text)
-                if possible_title:
+                possible_titles = extract_possible_titles(text)
+
+                for possible_title in possible_titles:
                     info = get_crossref_info_by_title(possible_title)
+                    if info:
+                        break
 
             if not info:
                 results.append({
@@ -443,6 +495,14 @@ if uploaded_files and start_button:
 
             st.markdown("#### 5. APA 서식 안내")
             st.info(result["APA 서식 안내"])
+            st.markdown("#### 6. 논문 검색 바로가기")
+            st.markdown(
+                make_search_links({
+                    "title": result["제목"],
+                    "doi": result["DOI"]
+                }),
+                unsafe_allow_html=True
+            )
 
         else:
             st.warning(
