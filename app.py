@@ -724,7 +724,7 @@ if st.session_state.results:
 
     success_count = len(df[df["상태"] == "성공"])
     manual_count = len(df[df["상태"] == "수동 보정 필요"])
-    fail_count = total_files - success_count - manual_count
+    fail_count = len(df) - success_count - manual_count
 
     duplicate_count = 0
     if "중복 여부" in df.columns:
