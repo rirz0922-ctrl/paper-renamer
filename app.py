@@ -8,8 +8,6 @@ import io
 
 st.set_page_config(page_title="PaperRenamer", layout="wide")
 
-st.title("📚 PaperRenamer")
-st.write("논문 PDF를 업로드한 뒤 [변경하기] 버튼을 누르면 자동 정리됩니다.")
 PASSWORD = "0210"
 
 if "authenticated" not in st.session_state:
@@ -27,6 +25,9 @@ if not st.session_state.authenticated:
             st.error("비밀번호가 틀렸습니다.")
 
     st.stop()
+
+st.title("📚 PaperRenamer")
+st.write("PDF 또는 ZIP 파일을 업로드한 뒤 [변경하기] 버튼을 누르면 자동 정리됩니다.")
 
 st.markdown("""
 <style>
@@ -77,8 +78,8 @@ st.info("""
 """)
 
 uploaded_files = st.file_uploader(
-    "PDF 파일 업로드",
-    type=["pdf"],
+    "PDF 또는 ZIP 파일 업로드",
+    type=["pdf", "zip"],
     accept_multiple_files=True
 )
 
@@ -90,6 +91,45 @@ def clean_filename(text):
     for ch in invalid_chars:
         text = text.replace(ch, "")
     return re.sub(r"\s+", " ", text).strip()
+
+
+def expand_uploaded_files(uploaded_files):
+    expanded_files = []
+
+    for uploaded_file in uploaded_files:
+        file_name = uploaded_file.name
+        file_bytes = uploaded_file.read()
+
+        if file_name.lower().endswith(".pdf"):
+            expanded_files.append({
+                "name": file_name,
+                "bytes": file_bytes,
+                "source": "PDF 직접 업로드"
+            })
+
+        elif file_name.lower().endswith(".zip"):
+            try:
+                zip_buffer = io.BytesIO(file_bytes)
+
+                with zipfile.ZipFile(zip_buffer, "r") as zip_ref:
+                    for zip_info in zip_ref.infolist():
+                        if zip_info.is_dir():
+                            continue
+
+                        if zip_info.filename.lower().endswith(".pdf"):
+                            pdf_bytes = zip_ref.read(zip_info.filename)
+                            pdf_name = zip_info.filename.split("/")[-1]
+
+                            expanded_files.append({
+                                "name": pdf_name,
+                                "bytes": pdf_bytes,
+                                "source": f"ZIP 내부 파일: {file_name}"
+                            })
+
+            except zipfile.BadZipFile:
+                st.error(f"ZIP 파일을 읽을 수 없습니다: {file_name}")
+
+    return expanded_files
 
 
 def is_korean_paper(info):
@@ -115,8 +155,7 @@ def find_doi(text):
         match = re.search(pattern, cleaned_text, re.I)
         if match:
             doi = match.group(1) if match.lastindex else match.group(0)
-            doi = doi.rstrip(".,;)")
-            return doi
+            return doi.rstrip(".,;)")
 
     return None
 
@@ -154,7 +193,6 @@ def get_crossref_info(doi):
         return None
 
     data = response.json()["message"]
-
     title = data.get("title", [""])[0]
 
     year = ""
@@ -186,7 +224,6 @@ def get_crossref_info(doi):
 
 def get_crossref_info_by_title(title):
     url = "https://api.crossref.org/works"
-
     params = {
         "query.title": title,
         "rows": 3
@@ -212,20 +249,15 @@ def get_crossref_info_by_title(title):
     return None
 
 
-def read_pdf_text(uploaded_file):
-    pdf_bytes = uploaded_file.read()
-
-    pdf = fitz.open(
-        stream=pdf_bytes,
-        filetype="pdf"
-    )
+def read_pdf_text_from_bytes(pdf_bytes):
+    pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
 
     text = ""
 
     for page_num in range(min(8, len(pdf))):
         text += pdf[page_num].get_text()
 
-    return text, pdf_bytes
+    return text
 
 
 def make_short_title(title, word_count=5):
@@ -332,6 +364,7 @@ def make_apa_format_note(info):
     else:
         return f"해외 논문으로 분류됨: 저널명 '{journal}'과 권(volume) '{volume}'은 이탤릭체로 처리하세요. 호(issue)는 이탤릭체로 처리하지 않습니다."
 
+
 def make_search_links(info):
     title = info.get("title", "")
     doi = info.get("doi", "")
@@ -356,23 +389,33 @@ def make_search_links(info):
 
 
 if uploaded_files and not start_button:
-    st.warning("PDF 업로드가 완료되었습니다. 정리를 시작하려면 [🚀 변경하기] 버튼을 눌러주세요.")
+    st.warning("파일 업로드가 완료되었습니다. 정리를 시작하려면 [🚀 변경하기] 버튼을 눌러주세요.")
 
 
 if uploaded_files and start_button:
+    expanded_files = expand_uploaded_files(uploaded_files)
+
+    if not expanded_files:
+        st.error("처리할 PDF 파일이 없습니다. PDF 또는 PDF가 들어 있는 ZIP 파일을 업로드해주세요.")
+        st.stop()
+
     results = []
     pdf_files_for_zip = []
 
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    total_files = len(uploaded_files)
+    total_files = len(expanded_files)
 
-    for idx, uploaded_file in enumerate(uploaded_files, start=1):
-        status_text.write(f"처리 중: {idx} / {total_files} - {uploaded_file.name}")
+    for idx, file_item in enumerate(expanded_files, start=1):
+        original_name = file_item["name"]
+        pdf_bytes = file_item["bytes"]
+        source = file_item["source"]
+
+        status_text.write(f"처리 중: {idx} / {total_files} - {original_name}")
 
         try:
-            text, pdf_bytes = read_pdf_text(uploaded_file)
+            text = read_pdf_text_from_bytes(pdf_bytes)
 
             doi = find_doi(text)
             info = get_crossref_info(doi) if doi else None
@@ -387,7 +430,8 @@ if uploaded_files and start_button:
 
             if not info:
                 results.append({
-                    "원래 파일명": uploaded_file.name,
+                    "원래 파일명": original_name,
+                    "업로드 출처": source,
                     "논문 구분": "",
                     "상태": "자동 정리 실패"
                 })
@@ -400,7 +444,8 @@ if uploaded_files and start_button:
             professor_filename = make_professor_filename(info)
 
             results.append({
-                "원래 파일명": uploaded_file.name,
+                "원래 파일명": original_name,
+                "업로드 출처": source,
                 "논문 구분": paper_type,
                 "저자": make_author_filename_text(info["authors"]),
                 "연도": info["year"],
@@ -425,7 +470,8 @@ if uploaded_files and start_button:
 
         except Exception as e:
             results.append({
-                "원래 파일명": uploaded_file.name,
+                "원래 파일명": original_name,
+                "업로드 출처": source,
                 "논문 구분": "",
                 "상태": f"오류: {e}"
             })
@@ -496,6 +542,7 @@ if uploaded_files and start_button:
         st.write(f"상태: **{result['상태']}**")
 
         if result["상태"] == "성공":
+            st.write(f"업로드 출처: **{result['업로드 출처']}**")
             st.write(f"논문 구분: **{result['논문 구분']}**")
 
             st.markdown("#### 1. 기본 최종 파일명")
@@ -512,6 +559,7 @@ if uploaded_files and start_button:
 
             st.markdown("#### 5. APA 서식 안내")
             st.info(result["APA 서식 안내"])
+
             st.markdown("#### 6. 논문 검색 바로가기")
             st.markdown(
                 make_search_links({
