@@ -76,6 +76,8 @@ st.info("""
 [APA 스타일]
 - 국문: 학회지명 + 권(volume) 굵게
 - 해외: 저널명 + 권(volume) 이탤릭체
+
+※ 국내 논문은 자동 추출이 불안정할 수 있어 수동 보정칸에서 제목/저자/연도 등을 확인하는 것을 권장합니다.
 """)
 
 uploaded_files = st.file_uploader(
@@ -149,10 +151,15 @@ def expand_uploaded_files(uploaded_files):
     return expanded_files
 
 
+def is_korean_text(text):
+    return bool(re.search(r"[가-힣]", text))
+
+
 def is_korean_paper(info):
     target_text = (
         info.get("title", "") +
         info.get("journal", "") +
+        info.get("korean_authors", "") +
         " ".join([a.get("family", "") for a in info.get("authors", [])])
     )
     return bool(re.search(r"[가-힣]", target_text))
@@ -177,19 +184,29 @@ def find_doi(text):
     return None
 
 
-def extract_possible_titles(text, max_titles=8):
+def extract_possible_titles(text, max_titles=10):
     lines = text.split("\n")
     candidates = []
 
     blocked_words = [
         "abstract", "keywords", "introduction", "references",
-        "journal", "volume", "issue", "copyright"
+        "journal", "volume", "issue", "copyright",
+        "석사학위논문", "박사학위논문", "학위논문",
+        "논문", "목차", "초록", "국문초록", "영문초록",
+        "대학교", "대학원", "학과", "전공",
+        "지도교수", "심사위원", "제출", "발행",
+        "한국학술지", "한국연구재단", "kci",
+        "원문보기", "저작권", "간행물", "학회",
+        "scale", "scales 전달파일"
     ]
 
     for line in lines:
         line = line.strip()
+        line = re.sub(r"\s+", " ", line)
 
-        if len(line) < 20:
+        if len(line) < 10:
+            continue
+        if len(line) > 180:
             continue
         if len(line.split()) > 35:
             continue
@@ -201,10 +218,63 @@ def extract_possible_titles(text, max_titles=8):
             continue
         if any(w in line.lower() for w in blocked_words):
             continue
+        if re.search(r"^(vol|no|pp|page|issn|eissn)", line.lower()):
+            continue
 
-        candidates.append(line)
+        # 한글 제목 후보는 너무 짧지만 않으면 허용
+        if is_korean_text(line) and len(line) >= 8:
+            candidates.append(line)
+            continue
 
-    return candidates[:max_titles]
+        # 영문 제목 후보
+        if len(line.split()) >= 4:
+            candidates.append(line)
+
+    # 중복 제거
+    unique = []
+    seen = set()
+
+    for c in candidates:
+        key = normalize_text(c)
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+
+    return unique[:max_titles]
+
+
+def extract_korean_author_candidates(text, max_authors=5):
+    lines = text.split("\n")
+    candidates = []
+
+    blocked = [
+        "대학교", "대학원", "학과", "전공", "지도교수",
+        "교수", "논문", "학회", "학술지", "초록",
+        "연구", "저널", "간행물", "원문", "목차"
+    ]
+
+    for line in lines[:80]:
+        line = line.strip()
+        line = re.sub(r"\s+", " ", line)
+
+        if any(b in line for b in blocked):
+            continue
+
+        # 저자: 홍길동 / 홍 길 동 / 홍길동, 김민지 / 홍길동·김민지
+        names = re.findall(r"[가-힣]{2,4}", line)
+
+        for name in names:
+            if name in blocked:
+                continue
+            if len(name) < 2 or len(name) > 4:
+                continue
+            if name not in candidates:
+                candidates.append(name)
+
+        if len(candidates) >= max_authors:
+            break
+
+    return candidates[:max_authors]
 
 
 def get_crossref_info(doi):
@@ -240,6 +310,7 @@ def get_crossref_info(doi):
         "title": title,
         "year": str(year),
         "authors": authors,
+        "korean_authors": "",
         "journal": journal,
         "volume": data.get("volume", ""),
         "issue": data.get("issue", ""),
@@ -282,7 +353,7 @@ def get_crossref_info_by_title(title):
                 best_info = info
                 best_score = score
 
-    if best_score < 0.45:
+    if best_score < 0.55:
         return None, best_score
 
     return best_info, best_score
@@ -303,7 +374,28 @@ def make_short_title(title, word_count=5):
     return clean_filename(" ".join(title.split()[:word_count]))
 
 
-def make_author_filename_text(authors):
+def split_korean_authors(author_text):
+    if not author_text:
+        return []
+
+    parts = re.split(r"[,，、·ㆍ&/]\s*|\s+", author_text.strip())
+    return [p for p in parts if p]
+
+
+def make_author_filename_text(info):
+    if is_korean_paper(info) and info.get("korean_authors"):
+        names = split_korean_authors(info["korean_authors"])
+
+        if len(names) == 0:
+            return "Unknown"
+        elif len(names) == 1:
+            return names[0]
+        elif len(names) == 2:
+            return f"{names[0]} & {names[1]}"
+        else:
+            return f"{names[0]} et al."
+
+    authors = info.get("authors", [])
     last_names = [a["family"] for a in authors if a.get("family")]
 
     if len(last_names) == 0:
@@ -318,21 +410,33 @@ def make_author_filename_text(authors):
 
 def make_default_filename(info):
     return clean_filename(
-        f"{make_author_filename_text(info['authors'])}, {info['year']}. {make_short_title(info['title'], 5)}.pdf"
+        f"{make_author_filename_text(info)}, {info['year']}. {make_short_title(info['title'], 5)}.pdf"
     )
 
 
 def make_professor_filename(info):
-    last_names = [a["family"] for a in info["authors"] if a.get("family")]
+    if is_korean_paper(info) and info.get("korean_authors"):
+        names = split_korean_authors(info["korean_authors"])
 
-    if len(last_names) == 0:
-        author_text = "Unknown"
-    elif len(last_names) == 1:
-        author_text = last_names[0]
-    elif len(last_names) == 2:
-        author_text = f"{last_names[0]}&{last_names[1]}"
+        if len(names) == 0:
+            author_text = "Unknown"
+        elif len(names) == 1:
+            author_text = names[0]
+        elif len(names) == 2:
+            author_text = f"{names[0]}&{names[1]}"
+        else:
+            author_text = f"{names[0]} et al"
     else:
-        author_text = f"{last_names[0]} et al"
+        last_names = [a["family"] for a in info.get("authors", []) if a.get("family")]
+
+        if len(last_names) == 0:
+            author_text = "Unknown"
+        elif len(last_names) == 1:
+            author_text = last_names[0]
+        elif len(last_names) == 2:
+            author_text = f"{last_names[0]}&{last_names[1]}"
+        else:
+            author_text = f"{last_names[0]} et al"
 
     keyword = make_short_title(info["title"], 3).replace(" ", "_")
     return clean_filename(f"{author_text}_{info['year']}_{keyword}.pdf")
@@ -346,26 +450,29 @@ def make_initials(given):
 
 
 def make_apa_plain(info):
-    author_parts = []
-
-    for author in info["authors"]:
-        family = author.get("family", "")
-        given = author.get("given", "")
-        initials = make_initials(given)
-        author_parts.append(f"{family}, {initials}".strip())
-
-    if len(author_parts) == 0:
-        author_text = "Unknown"
-    elif len(author_parts) == 1:
-        author_text = author_parts[0]
-    elif len(author_parts) == 2:
-        author_text = f"{author_parts[0]} & {author_parts[1]}"
+    if is_korean_paper(info) and info.get("korean_authors"):
+        author_text = info["korean_authors"]
     else:
-        author_text = ", ".join(author_parts[:-1]) + f", & {author_parts[-1]}"
+        author_parts = []
 
-    issue_text = f"({info['issue']})" if info["issue"] else ""
-    page_text = f", {info['page']}" if info["page"] else ""
-    doi_text = f" https://doi.org/{info['doi']}" if info["doi"] else ""
+        for author in info.get("authors", []):
+            family = author.get("family", "")
+            given = author.get("given", "")
+            initials = make_initials(given)
+            author_parts.append(f"{family}, {initials}".strip())
+
+        if len(author_parts) == 0:
+            author_text = "Unknown"
+        elif len(author_parts) == 1:
+            author_text = author_parts[0]
+        elif len(author_parts) == 2:
+            author_text = f"{author_parts[0]} & {author_parts[1]}"
+        else:
+            author_text = ", ".join(author_parts[:-1]) + f", & {author_parts[-1]}"
+
+    issue_text = f"({info['issue']})" if info.get("issue") else ""
+    page_text = f", {info['page']}" if info.get("page") else ""
+    doi_text = f" https://doi.org/{info['doi']}" if info.get("doi") else ""
 
     return (
         f"{author_text} ({info['year']}). "
@@ -379,8 +486,8 @@ def make_apa_plain(info):
 def make_apa_markdown(info):
     apa = make_apa_plain(info)
 
-    journal = info["journal"]
-    volume = info["volume"]
+    journal = info.get("journal", "")
+    volume = info.get("volume", "")
 
     if is_korean_paper(info):
         if journal:
@@ -395,8 +502,8 @@ def make_apa_markdown(info):
 
 
 def make_apa_format_note(info):
-    journal = info["journal"]
-    volume = info["volume"]
+    journal = info.get("journal", "")
+    volume = info.get("volume", "")
 
     if is_korean_paper(info):
         return f"국문 논문으로 분류됨: 학회지명 '{journal}'과 권(volume) '{volume}'은 굵게 처리하세요. 쉼표는 굵게 처리하지 않습니다."
@@ -411,6 +518,7 @@ def make_search_links(info):
     scholar_url = f"https://scholar.google.com/scholar?q={requests.utils.quote(title)}"
     crossref_url = f"https://search.crossref.org/?q={requests.utils.quote(title)}"
     cnu_url = f"https://library.cnu.ac.kr/search/tot/result?st=KWRD&si=TOTAL&q={requests.utils.quote(title)}"
+    riss_url = f"https://www.riss.kr/search/Search.do?query={requests.utils.quote(title)}"
     doi_url = f"https://doi.org/{doi}" if doi else ""
 
     links = ""
@@ -422,6 +530,7 @@ def make_search_links(info):
     <a class="link-button" href="{scholar_url}" target="_blank">🔎 Google Scholar 검색</a>
     <a class="link-button" href="{crossref_url}" target="_blank">🧷 Crossref 검색</a>
     <a class="link-button" href="{cnu_url}" target="_blank">📚 충남대 도서관 검색</a>
+    <a class="link-button" href="{riss_url}" target="_blank">📄 RISS 검색</a>
     """
 
     return links
@@ -435,6 +544,20 @@ def make_duplicate_key(info):
         return "doi:" + doi.lower().strip()
 
     return "title:" + normalize_text(title)
+
+
+def make_manual_info(result, prefix):
+    return {
+        "title": st.text_input("제목", value=result.get("제목", ""), key=f"title_{prefix}"),
+        "year": st.text_input("연도", value=result.get("연도", ""), key=f"year_{prefix}"),
+        "korean_authors": st.text_input("국문 저자명", value=result.get("국문 저자 후보", ""), key=f"kauthors_{prefix}"),
+        "authors": result.get("authors_raw", []),
+        "journal": st.text_input("저널/학회지", value=result.get("저널/학회지", ""), key=f"journal_{prefix}"),
+        "volume": st.text_input("권", value=result.get("권", ""), key=f"volume_{prefix}"),
+        "issue": st.text_input("호", value=result.get("호", ""), key=f"issue_{prefix}"),
+        "page": st.text_input("페이지", value=result.get("페이지", ""), key=f"page_{prefix}"),
+        "doi": st.text_input("DOI", value=result.get("DOI", ""), key=f"doi_{prefix}")
+    }
 
 
 if uploaded_files and not start_button:
@@ -467,31 +590,40 @@ if uploaded_files and start_button:
         try:
             text = read_pdf_text_from_bytes(pdf_bytes)
 
+            korean_author_candidates = extract_korean_author_candidates(text)
+            title_candidates = extract_possible_titles(text)
+
             doi = find_doi(text)
             info = get_crossref_info(doi) if doi else None
             match_score = 1.0 if info else 0
             search_method = "DOI 검색" if info else ""
 
             if not info:
-                possible_titles = extract_possible_titles(text)
-
-                for possible_title in possible_titles:
+                for possible_title in title_candidates:
                     info, match_score = get_crossref_info_by_title(possible_title)
                     if info:
                         search_method = f"제목 검색 / 유사도 {match_score:.2f}"
                         break
 
             if not info:
-                results.append({
-                    "원래 파일명": original_name,
-                    "업로드 출처": source,
-                    "논문 구분": "",
-                    "중복 여부": "",
-                    "메타데이터 경고": "Crossref 검색 실패",
-                    "상태": "자동 정리 실패"
-                })
-                progress_bar.progress(idx / total_files)
-                continue
+                # 실패해도 후보 기반으로 수동 보정 가능하게 결과 생성
+                fallback_title = title_candidates[0] if title_candidates else ""
+                info = {
+                    "title": fallback_title,
+                    "year": "",
+                    "authors": [],
+                    "korean_authors": ", ".join(korean_author_candidates),
+                    "journal": "",
+                    "volume": "",
+                    "issue": "",
+                    "page": "",
+                    "doi": ""
+                }
+                search_method = "자동 검색 실패 / 수동 보정 필요"
+                match_score = 0
+
+            if korean_author_candidates and is_korean_text(info.get("title", "") + info.get("journal", "")):
+                info["korean_authors"] = ", ".join(korean_author_candidates)
 
             duplicate_key = make_duplicate_key(info)
 
@@ -508,7 +640,7 @@ if uploaded_files and start_button:
 
             warnings = []
 
-            if make_author_filename_text(info["authors"]) == "Unknown":
+            if make_author_filename_text(info) == "Unknown":
                 warnings.append("저자 정보 없음")
 
             if not info["year"]:
@@ -517,8 +649,11 @@ if uploaded_files and start_button:
             if not info["journal"]:
                 warnings.append("저널/학회지 정보 없음")
 
-            if match_score < 0.65:
+            if search_method.startswith("제목 검색") and match_score < 0.70:
                 warnings.append(f"제목 검색 정확도 낮음({match_score:.2f})")
+
+            if search_method.startswith("자동 검색 실패"):
+                warnings.append("수동 보정 필요")
 
             metadata_warning = ", ".join(warnings) if warnings else "없음"
 
@@ -529,9 +664,11 @@ if uploaded_files and start_button:
                 "중복 여부": duplicate_status,
                 "검색 방식": search_method,
                 "메타데이터 경고": metadata_warning,
-                "저자": make_author_filename_text(info["authors"]),
+                "저자": make_author_filename_text(info),
+                "국문 저자 후보": info.get("korean_authors", ""),
                 "연도": info["year"],
                 "제목": info["title"],
+                "제목 후보": " | ".join(title_candidates),
                 "저널/학회지": info["journal"],
                 "권": info["volume"],
                 "호": info["issue"],
@@ -542,7 +679,8 @@ if uploaded_files and start_button:
                 "APA 참고문헌": make_apa_plain(info),
                 "APA 표시용": make_apa_markdown(info),
                 "APA 서식 안내": make_apa_format_note(info),
-                "상태": "성공"
+                "상태": "성공" if not search_method.startswith("자동 검색 실패") else "수동 보정 필요",
+                "authors_raw": info.get("authors", [])
             })
 
             pdf_files_for_zip.append({
@@ -567,21 +705,28 @@ if uploaded_files and start_button:
     df = pd.DataFrame(results)
 
     success_count = len(df[df["상태"] == "성공"])
-    fail_count = total_files - success_count
-    duplicate_count = len(df[df.get("중복 여부", "") != "중복 아님"]) if "중복 여부" in df.columns else 0
+    manual_count = len(df[df["상태"] == "수동 보정 필요"])
+    fail_count = total_files - success_count - manual_count
 
-    st.success(f"전체 {total_files}개 중 성공 {success_count}개, 실패 {fail_count}개, 중복 가능 {duplicate_count}개")
+    duplicate_count = 0
+    if "중복 여부" in df.columns:
+        duplicate_count = len(df[
+            (df["중복 여부"] != "중복 아님") &
+            (df["중복 여부"] != "")
+        ])
+
+    st.success(f"전체 {total_files}개 중 성공 {success_count}개, 수동 보정 필요 {manual_count}개, 실패 {fail_count}개, 중복 가능 {duplicate_count}개")
 
     if duplicate_count > 0:
         st.warning("중복 가능 논문이 감지되었습니다. DOI 또는 제목 기준으로 같은 논문일 가능성이 있습니다.")
 
     st.subheader("📋 정리 결과")
     st.dataframe(
-        df.drop(columns=["APA 표시용"], errors="ignore"),
+        df.drop(columns=["APA 표시용", "authors_raw"], errors="ignore"),
         use_container_width=True
     )
 
-    csv = df.drop(columns=["APA 표시용"], errors="ignore").to_csv(index=False).encode("utf-8-sig")
+    csv = df.drop(columns=["APA 표시용", "authors_raw"], errors="ignore").to_csv(index=False).encode("utf-8-sig")
 
     st.download_button(
         "📥 정리 결과 CSV 다운로드",
@@ -622,49 +767,96 @@ if uploaded_files and start_button:
             mime="application/zip"
         )
 
-    st.subheader("📌 복붙용 결과")
+    st.subheader("📌 복붙용 결과 및 수동 보정")
 
-    for result in results:
+    st.warning("국내 논문, 오래된 논문, DOI가 없는 논문은 자동 추출이 틀릴 수 있습니다. 아래 수동 보정칸에서 제목/저자/연도 등을 확인한 뒤 보정본을 사용하세요.")
+
+    corrected_results = []
+
+    for i, result in enumerate(results):
         st.divider()
         st.markdown(f"### 원래 파일명: `{result['원래 파일명']}`")
         st.write(f"상태: **{result['상태']}**")
 
-        if result["상태"] == "성공":
-            st.write(f"업로드 출처: **{result['업로드 출처']}**")
-            st.write(f"논문 구분: **{result['논문 구분']}**")
-            st.write(f"중복 여부: **{result['중복 여부']}**")
-            st.write(f"검색 방식: **{result['검색 방식']}**")
+        if result["상태"].startswith("오류"):
+            st.warning("이 파일은 처리 중 오류가 발생했습니다.")
+            continue
 
-            if result["메타데이터 경고"] != "없음":
-                st.warning(f"메타데이터 경고: {result['메타데이터 경고']}")
+        st.write(f"업로드 출처: **{result['업로드 출처']}**")
+        st.write(f"논문 구분: **{result['논문 구분']}**")
+        st.write(f"중복 여부: **{result['중복 여부']}**")
+        st.write(f"검색 방식: **{result['검색 방식']}**")
 
-            st.markdown("#### 1. 기본 최종 파일명")
-            st.code(result["기본 최종 파일명"])
+        if result["메타데이터 경고"] != "없음":
+            st.warning(f"메타데이터 경고: {result['메타데이터 경고']}")
 
-            st.markdown("#### 2. 교수님 스타일 파일명")
-            st.code(result["교수님 스타일 파일명"])
+        if result.get("제목 후보"):
+            with st.expander("🔎 제목 후보 보기"):
+                for candidate in result["제목 후보"].split(" | "):
+                    st.write(candidate)
 
-            st.markdown("#### 3. APA 참고문헌 복붙용")
-            st.code(result["APA 참고문헌"])
+        with st.expander("✏️ 수동 보정하기", expanded=(result["상태"] != "성공")):
+            manual_info = make_manual_info(result, i)
 
-            st.markdown("#### 4. APA 스타일 미리보기")
-            st.markdown(result["APA 표시용"])
+            corrected_default = make_default_filename(manual_info)
+            corrected_prof = make_professor_filename(manual_info)
+            corrected_apa = make_apa_plain(manual_info)
+            corrected_apa_md = make_apa_markdown(manual_info)
+            corrected_note = make_apa_format_note(manual_info)
 
-            st.markdown("#### 5. APA 서식 안내")
-            st.info(result["APA 서식 안내"])
+            st.markdown("#### 보정 후 기본 최종 파일명")
+            st.code(corrected_default)
 
-            st.markdown("#### 6. 논문 검색 바로가기")
-            st.markdown(
-                make_search_links({
-                    "title": result["제목"],
-                    "doi": result["DOI"]
-                }),
-                unsafe_allow_html=True
-            )
+            st.markdown("#### 보정 후 교수님 스타일 파일명")
+            st.code(corrected_prof)
 
-        else:
-            st.warning(
-                "DOI 또는 제목 검색에 실패했습니다. "
-                "스캔 PDF이거나, PDF 텍스트 추출이 어렵거나, "
-                "Crossref에 메타데이터가 부족한 논문일 수 있습니다."
-            )
+            st.markdown("#### 보정 후 APA 참고문헌")
+            st.code(corrected_apa)
+
+            st.markdown("#### 보정 후 APA 스타일 미리보기")
+            st.markdown(corrected_apa_md)
+
+            st.markdown("#### 보정 후 APA 서식 안내")
+            st.info(corrected_note)
+
+            corrected_results.append({
+                "원래 파일명": result["원래 파일명"],
+                "보정 후 기본 최종 파일명": corrected_default,
+                "보정 후 교수님 스타일 파일명": corrected_prof,
+                "보정 후 APA 참고문헌": corrected_apa
+            })
+
+        st.markdown("#### 1. 자동 기본 최종 파일명")
+        st.code(result["기본 최종 파일명"])
+
+        st.markdown("#### 2. 자동 교수님 스타일 파일명")
+        st.code(result["교수님 스타일 파일명"])
+
+        st.markdown("#### 3. 자동 APA 참고문헌 복붙용")
+        st.code(result["APA 참고문헌"])
+
+        st.markdown("#### 4. 자동 APA 스타일 미리보기")
+        st.markdown(result["APA 표시용"])
+
+        st.markdown("#### 5. 자동 APA 서식 안내")
+        st.info(result["APA 서식 안내"])
+
+        st.markdown("#### 6. 논문 검색 바로가기")
+        st.markdown(
+            make_search_links({
+                "title": result["제목"],
+                "doi": result["DOI"]
+            }),
+            unsafe_allow_html=True
+        )
+
+    if corrected_results:
+        corrected_df = pd.DataFrame(corrected_results)
+        corrected_csv = corrected_df.to_csv(index=False).encode("utf-8-sig")
+
+        st.download_button(
+            "📥 수동 보정 결과 CSV 다운로드",
+            data=corrected_csv,
+            file_name="paper_renamer_corrected_results.csv",
+            mime="text/csv"
+        )
