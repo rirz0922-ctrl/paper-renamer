@@ -88,6 +88,15 @@ uploaded_files = st.file_uploader(
 
 start_button = st.button("🚀 변경하기")
 
+if "results" not in st.session_state:
+    st.session_state.results = None
+
+if "pdf_files_for_zip" not in st.session_state:
+    st.session_state.pdf_files_for_zip = None
+
+if "processed" not in st.session_state:
+    st.session_state.processed = False
+
 
 def clean_filename(text):
     invalid_chars = '\\/:*?"<>|'
@@ -565,6 +574,7 @@ if uploaded_files and not start_button:
 
 
 if uploaded_files and start_button:
+    st.session_state.processed = True
     expanded_files = expand_uploaded_files(uploaded_files)
 
     if not expanded_files:
@@ -702,7 +712,17 @@ if uploaded_files and start_button:
 
     status_text.success("처리 완료!")
 
+    st.session_state.results = results
+    st.session_state.pdf_files_for_zip = pdf_files_for_zip
+
+
+if st.session_state.results:
+    results = st.session_state.results
+    pdf_files_for_zip = st.session_state.pdf_files_for_zip
+
     df = pd.DataFrame(results)
+
+   df = pd.DataFrame(results)
 
     success_count = len(df[df["상태"] == "성공"])
     manual_count = len(df[df["상태"] == "수동 보정 필요"])
@@ -859,4 +879,4 @@ if uploaded_files and start_button:
             data=corrected_csv,
             file_name="paper_renamer_corrected_results.csv",
             mime="text/csv"
-        )
+        ) 
