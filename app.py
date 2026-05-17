@@ -733,7 +733,7 @@ if st.session_state.results:
             (df["중복 여부"] != "")
         ])
 
-    st.success(f"전체 {total_files}개 중 성공 {success_count}개, 수동 보정 필요 {manual_count}개, 실패 {fail_count}개, 중복 가능 {duplicate_count}개")
+    st.success(f"전체 {len(df)}개 중 성공 {success_count}개, 수동 보정 필요 {manual_count}개, 실패 {fail_count}개, 중복 가능 {duplicate_count}개")
 
     if duplicate_count > 0:
         st.warning("중복 가능 논문이 감지되었습니다. DOI 또는 제목 기준으로 같은 논문일 가능성이 있습니다.")
