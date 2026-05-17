@@ -722,8 +722,6 @@ if st.session_state.results:
 
     df = pd.DataFrame(results)
 
-   df = pd.DataFrame(results)
-
     success_count = len(df[df["상태"] == "성공"])
     manual_count = len(df[df["상태"] == "수동 보정 필요"])
     fail_count = total_files - success_count - manual_count
